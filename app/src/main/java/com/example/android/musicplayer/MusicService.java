@@ -27,18 +27,35 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.AudioManager;
 import android.media.MediaMetadataRetriever;
-import android.media.MediaPlayer;
-import android.media.MediaPlayer.OnCompletionListener;
-import android.media.MediaPlayer.OnErrorListener;
-import android.media.MediaPlayer.OnPreparedListener;
 import android.media.RemoteControlClient;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.WifiLock;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
 import android.widget.Toast;
+
+import com.google.android.exoplayer2.DefaultLoadControl;
+import com.google.android.exoplayer2.ExoPlaybackException;
+import com.google.android.exoplayer2.ExoPlayer;
+import com.google.android.exoplayer2.ExoPlayerFactory;
+import com.google.android.exoplayer2.SimpleExoPlayer;
+import com.google.android.exoplayer2.Timeline;
+import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
+import com.google.android.exoplayer2.extractor.ExtractorsFactory;
+import com.google.android.exoplayer2.source.ExtractorMediaSource;
+import com.google.android.exoplayer2.source.MediaSource;
+import com.google.android.exoplayer2.source.SingleSampleMediaSource;
+import com.google.android.exoplayer2.source.TrackGroupArray;
+import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
+import com.google.android.exoplayer2.trackselection.TrackSelectionArray;
+import com.google.android.exoplayer2.trackselection.TrackSelector;
+import com.google.android.exoplayer2.upstream.DataSource;
+import com.google.android.exoplayer2.upstream.DefaultBandwidthMeter;
+import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
+import com.google.android.exoplayer2.util.Util;
 
 import java.io.IOException;
 
@@ -49,9 +66,8 @@ import java.io.IOException;
  * {@link MainActivity}, which signal the service to perform specific operations: Play, Pause,
  * Rewind, Skip, etc.
  */
-public class MusicService extends Service implements OnCompletionListener, OnPreparedListener,
-                OnErrorListener, MusicFocusable,
-                PrepareMusicRetrieverTask.MusicRetrieverPreparedListener {
+public class MusicService extends Service implements MusicFocusable,
+                PrepareMusicRetrieverTask.MusicRetrieverPreparedListener, ExoPlayer.EventListener, ExtractorMediaSource.EventListener {
 
     // The tag we put on debug messages
     final static String TAG = "RandomMusicPlayer";
@@ -74,11 +90,13 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
     public static final float DUCK_VOLUME = 0.1f;
 
     // our media player
-    MediaPlayer mPlayer = null;
+    SimpleExoPlayer mPlayer = null;
 
     // our AudioFocusHelper object, if it's available (it's available on SDK level >= 8)
     // If not available, this will be null. Always check for null before using!
     AudioFocusHelper mAudioFocusHelper = null;
+    private DataSource.Factory mediaDataSourceFactory;
+    private Handler mainHandler;
 
     // indicates the state our service:
     enum State {
@@ -158,23 +176,16 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
      */
     void createMediaPlayerIfNeeded() {
         if (mPlayer == null) {
-            mPlayer = new MediaPlayer();
+            Handler mainHandler = new Handler();
 
-            // Make sure the media player will acquire a wake-lock while playing. If we don't do
-            // that, the CPU might go to sleep while the song is playing, causing playback to stop.
-            //
-            // Remember that to use this, we have to declare the android.permission.WAKE_LOCK
-            // permission in AndroidManifest.xml.
-            mPlayer.setWakeMode(getApplicationContext(), PowerManager.PARTIAL_WAKE_LOCK);
+            mPlayer = ExoPlayerFactory.newSimpleInstance(this, new DefaultTrackSelector(), new DefaultLoadControl());
 
             // we want the media player to notify us when it's ready preparing, and when it's done
             // playing:
-            mPlayer.setOnPreparedListener(this);
-            mPlayer.setOnCompletionListener(this);
-            mPlayer.setOnErrorListener(this);
+            mPlayer.addListener(this);
         }
         else
-            mPlayer.reset();
+            mPlayer.stop();
     }
 
     @Override
@@ -201,6 +212,13 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
         mDummyAlbumArt = BitmapFactory.decodeResource(getResources(), R.drawable.dummy_album_art);
 
         mMediaButtonReceiverComponent = new ComponentName(this, MusicIntentReceiver.class);
+
+        mediaDataSourceFactory = buildDataSourceFactory(true);
+        mainHandler = new Handler();
+    }
+
+    private DataSource.Factory buildDataSourceFactory(boolean useBandwidthMeter) {
+        return new DefaultDataSourceFactory(this, "RandomMusicPlayer");
     }
 
     /**
@@ -273,7 +291,7 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
         if (mState == State.Playing) {
             // Pause media player and cancel the 'foreground service' state.
             mState = State.Paused;
-            mPlayer.pause();
+            mPlayer.setPlayWhenReady(false);
             relaxResources(false); // while paused, we always retain the MediaPlayer
             // do not give up audio focus
         }
@@ -332,7 +350,7 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
 
         // stop and release the Media Player, if it's available
         if (releaseMediaPlayer && mPlayer != null) {
-            mPlayer.reset();
+            mPlayer.stop();
             mPlayer.release();
             mPlayer = null;
         }
@@ -360,15 +378,15 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
             // If we don't have audio focus and can't duck, we have to pause, even if mState
             // is State.Playing. But we stay in the Playing state so that we know we have to resume
             // playback once we get the focus back.
-            if (mPlayer.isPlaying()) mPlayer.pause();
+            if (mPlayer.getPlayWhenReady()) mPlayer.setPlayWhenReady(false);
             return;
         }
         else if (mAudioFocus == AudioFocus.NoFocusCanDuck)
-            mPlayer.setVolume(DUCK_VOLUME, DUCK_VOLUME);  // we'll be relatively quiet
+            mPlayer.setVolume(DUCK_VOLUME);  // we'll be relatively quiet
         else
-            mPlayer.setVolume(1.0f, 1.0f); // we can be loud
+            mPlayer.setVolume(1.0f); // we can be loud
 
-        if (!mPlayer.isPlaying()) mPlayer.start();
+        if (!mPlayer.getPlayWhenReady()) mPlayer.setPlayWhenReady(true);
     }
 
     void processAddRequest(Intent intent) {
@@ -403,112 +421,99 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
         mState = State.Stopped;
         relaxResources(false); // release everything except MediaPlayer
 
-        try {
-            MusicRetriever.Item playingItem = null;
-            if (manualUrl != null) {
-                // set the source of the media player to a manual URL or path
-                createMediaPlayerIfNeeded();
-                mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-                mPlayer.setDataSource(manualUrl);
-                mIsStreaming = manualUrl.startsWith("http:") || manualUrl.startsWith("https:");
+        MusicRetriever.Item playingItem = null;
+        if (manualUrl != null) {
+            // set the source of the media player to a manual URL or path
+            createMediaPlayerIfNeeded();
+            mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            // Measures bandwidth during playback. Can be null if not required.
+            DefaultBandwidthMeter bandwidthMeter = new DefaultBandwidthMeter();
+            // Produces DataSource instances through which media data is loaded.
+            DataSource.Factory dataSourceFactory = new DefaultDataSourceFactory(this,
+                    Util.getUserAgent(this, "RandomMusicPlayer"), bandwidthMeter);
+            // Produces Extractor instances for parsing the media data.
+            ExtractorsFactory extractorsFactory = new DefaultExtractorsFactory();
+            // This is the MediaSource representing the media to be played.
+            Uri uri = Uri.parse(manualUrl);
+            MediaSource audioSource = new ExtractorMediaSource(uri,
+                    dataSourceFactory, extractorsFactory, null, null);
+            // Prepare the player with the source.
+            mPlayer.prepare(audioSource);
+            mIsStreaming = manualUrl.startsWith("http:") || manualUrl.startsWith("https:");
 
-                playingItem = new MusicRetriever.Item(0, null, manualUrl, null, 0);
-            }
-            else {
-                mIsStreaming = false; // playing a locally available song
-
-                playingItem = mRetriever.getRandomItem();
-                if (playingItem == null) {
-                    Toast.makeText(this,
-                            "No available music to play. Place some music on your external storage "
-                            + "device (e.g. your SD card) and try again.",
-                            Toast.LENGTH_LONG).show();
-                    processStopRequest(true); // stop everything!
-                    return;
-                }
-
-                // set the source of the media player a a content URI
-                createMediaPlayerIfNeeded();
-                mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-                mPlayer.setDataSource(getApplicationContext(), playingItem.getURI());
-            }
-
-            mSongTitle = playingItem.getTitle();
-
-            mState = State.Preparing;
-            setUpAsForeground(mSongTitle + " (loading)");
-
-            // Use the media button APIs (if available) to register ourselves for media button
-            // events
-
-            MediaButtonHelper.registerMediaButtonEventReceiverCompat(
-                    mAudioManager, mMediaButtonReceiverComponent);
-
-            // Use the remote control APIs (if available) to set the playback state
-
-            if (mRemoteControlClientCompat == null) {
-                Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
-                intent.setComponent(mMediaButtonReceiverComponent);
-                mRemoteControlClientCompat = new RemoteControlClientCompat(
-                        PendingIntent.getBroadcast(this /*context*/,
-                                0 /*requestCode, ignored*/, intent /*intent*/, 0 /*flags*/));
-                RemoteControlHelper.registerRemoteControlClient(mAudioManager,
-                        mRemoteControlClientCompat);
-            }
-
-            mRemoteControlClientCompat.setPlaybackState(
-                    RemoteControlClient.PLAYSTATE_PLAYING);
-
-            mRemoteControlClientCompat.setTransportControlFlags(
-                    RemoteControlClient.FLAG_KEY_MEDIA_PLAY |
-                    RemoteControlClient.FLAG_KEY_MEDIA_PAUSE |
-                    RemoteControlClient.FLAG_KEY_MEDIA_NEXT |
-                    RemoteControlClient.FLAG_KEY_MEDIA_STOP);
-
-            // Update the remote controls
-            mRemoteControlClientCompat.editMetadata(true)
-                    .putString(MediaMetadataRetriever.METADATA_KEY_ARTIST, playingItem.getArtist())
-                    .putString(MediaMetadataRetriever.METADATA_KEY_ALBUM, playingItem.getAlbum())
-                    .putString(MediaMetadataRetriever.METADATA_KEY_TITLE, playingItem.getTitle())
-                    .putLong(MediaMetadataRetriever.METADATA_KEY_DURATION,
-                            playingItem.getDuration())
-                    // TODO: fetch real item artwork
-                    .putBitmap(
-                            RemoteControlClientCompat.MetadataEditorCompat.METADATA_KEY_ARTWORK,
-                            mDummyAlbumArt)
-                    .apply();
-
-            // starts preparing the media player in the background. When it's done, it will call
-            // our OnPreparedListener (that is, the onPrepared() method on this class, since we set
-            // the listener to 'this').
-            //
-            // Until the media player is prepared, we *cannot* call start() on it!
-            mPlayer.prepareAsync();
-
-            // If we are streaming from the internet, we want to hold a Wifi lock, which prevents
-            // the Wifi radio from going to sleep while the song is playing. If, on the other hand,
-            // we are *not* streaming, we want to release the lock if we were holding it before.
-            if (mIsStreaming) mWifiLock.acquire();
-            else if (mWifiLock.isHeld()) mWifiLock.release();
+            playingItem = new MusicRetriever.Item(0, null, manualUrl, null, 0);
         }
-        catch (IOException ex) {
-            Log.e("MusicService", "IOException playing next song: " + ex.getMessage());
-            ex.printStackTrace();
+        else {
+            mIsStreaming = false; // playing a locally available song
+
+            playingItem = mRetriever.getRandomItem();
+            if (playingItem == null) {
+                Toast.makeText(this,
+                        "No available music to play. Place some music on your external storage "
+                        + "device (e.g. your SD card) and try again.",
+                        Toast.LENGTH_LONG).show();
+                processStopRequest(true); // stop everything!
+                return;
+            }
+
+            // set the source of the media player a a content URI
+            createMediaPlayerIfNeeded();
+            mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            MediaSource audioSource = new ExtractorMediaSource(playingItem.getURI(), mediaDataSourceFactory, new DefaultExtractorsFactory(),
+                    mainHandler, this);
+            mPlayer.prepare(audioSource);
         }
-    }
 
-    /** Called when media player is done playing current song. */
-    public void onCompletion(MediaPlayer player) {
-        // The media player finished playing the current song, so we go ahead and start the next.
-        playNextSong(null);
-    }
+        mSongTitle = playingItem.getTitle();
 
-    /** Called when media player is done preparing. */
-    public void onPrepared(MediaPlayer player) {
-        // The media player is done preparing. That means we can start playing!
-        mState = State.Playing;
-        updateNotification(mSongTitle + " (playing)");
-        configAndStartMediaPlayer();
+        mState = State.Preparing;
+        setUpAsForeground(mSongTitle + " (loading)");
+
+        // Use the media button APIs (if available) to register ourselves for media button
+        // events
+
+        MediaButtonHelper.registerMediaButtonEventReceiverCompat(
+                mAudioManager, mMediaButtonReceiverComponent);
+
+        // Use the remote control APIs (if available) to set the playback state
+
+        if (mRemoteControlClientCompat == null) {
+            Intent intent = new Intent(Intent.ACTION_MEDIA_BUTTON);
+            intent.setComponent(mMediaButtonReceiverComponent);
+            mRemoteControlClientCompat = new RemoteControlClientCompat(
+                    PendingIntent.getBroadcast(this /*context*/,
+                            0 /*requestCode, ignored*/, intent /*intent*/, 0 /*flags*/));
+            RemoteControlHelper.registerRemoteControlClient(mAudioManager,
+                    mRemoteControlClientCompat);
+        }
+
+        mRemoteControlClientCompat.setPlaybackState(
+                RemoteControlClient.PLAYSTATE_PLAYING);
+
+        mRemoteControlClientCompat.setTransportControlFlags(
+                RemoteControlClient.FLAG_KEY_MEDIA_PLAY |
+                RemoteControlClient.FLAG_KEY_MEDIA_PAUSE |
+                RemoteControlClient.FLAG_KEY_MEDIA_NEXT |
+                RemoteControlClient.FLAG_KEY_MEDIA_STOP);
+
+        // Update the remote controls
+        mRemoteControlClientCompat.editMetadata(true)
+                .putString(MediaMetadataRetriever.METADATA_KEY_ARTIST, playingItem.getArtist())
+                .putString(MediaMetadataRetriever.METADATA_KEY_ALBUM, playingItem.getAlbum())
+                .putString(MediaMetadataRetriever.METADATA_KEY_TITLE, playingItem.getTitle())
+                .putLong(MediaMetadataRetriever.METADATA_KEY_DURATION,
+                        playingItem.getDuration())
+                // TODO: fetch real item artwork
+                .putBitmap(
+                        RemoteControlClientCompat.MetadataEditorCompat.METADATA_KEY_ARTWORK,
+                        mDummyAlbumArt)
+                .apply();
+
+        // If we are streaming from the internet, we want to hold a Wifi lock, which prevents
+        // the Wifi radio from going to sleep while the song is playing. If, on the other hand,
+        // we are *not* streaming, we want to release the lock if we were holding it before.
+        if (mIsStreaming) mWifiLock.acquire();
+        else if (mWifiLock.isHeld()) mWifiLock.release();
     }
 
     /** Updates the notification. */
@@ -544,21 +549,6 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
         startForeground(NOTIFICATION_ID, mNotificationBuilder.build());
     }
 
-    /**
-     * Called when there's an error playing media. When this happens, the media player goes to
-     * the Error state. We warn the user about the error and reset the media player.
-     */
-    public boolean onError(MediaPlayer mp, int what, int extra) {
-        Toast.makeText(getApplicationContext(), "Media player error! Resetting.",
-            Toast.LENGTH_SHORT).show();
-        Log.e(TAG, "Error: what=" + String.valueOf(what) + ", extra=" + String.valueOf(extra));
-
-        mState = State.Stopped;
-        relaxResources(true);
-        giveUpAudioFocus();
-        return true; // true indicates we handled the error
-    }
-
     public void onGainedAudioFocus() {
         Toast.makeText(getApplicationContext(), "gained audio focus.", Toast.LENGTH_SHORT).show();
         mAudioFocus = AudioFocus.Focused;
@@ -574,7 +564,7 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
         mAudioFocus = canDuck ? AudioFocus.NoFocusCanDuck : AudioFocus.NoFocusNoDuck;
 
         // start/restart/pause media player with new focus settings
-        if (mPlayer != null && mPlayer.isPlaying())
+        if (mPlayer != null && mPlayer.getPlayWhenReady())
             configAndStartMediaPlayer();
     }
 
@@ -603,4 +593,60 @@ public class MusicService extends Service implements OnCompletionListener, OnPre
     public IBinder onBind(Intent arg0) {
         return null;
     }
+
+    @Override
+    public void onTimelineChanged(Timeline timeline, Object manifest) {
+
+    }
+
+    @Override
+    public void onTracksChanged(TrackGroupArray trackGroups, TrackSelectionArray trackSelections) {
+
+    }
+
+    @Override
+    public void onLoadingChanged(boolean isLoading) {
+
+    }
+
+    @Override
+    public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+        if (playbackState == ExoPlayer.STATE_ENDED) {
+            // The media player finished playing the current song, so we go ahead and start the next.
+            playNextSong(null);
+        } else if (playbackState == ExoPlayer.STATE_READY) {
+            // The media player is done preparing. That means we can start playing!
+            mState = State.Playing;
+            updateNotification(mSongTitle + " (playing)");
+            configAndStartMediaPlayer();
+        }
+    }
+
+    @Override
+    public void onPlayerError(ExoPlaybackException error) {
+        Toast.makeText(getApplicationContext(), "Media player error! Resetting.",
+                Toast.LENGTH_SHORT).show();
+        Log.e(TAG, "Error: what=" + String.valueOf(error));
+
+        mState = State.Stopped;
+        relaxResources(true);
+        giveUpAudioFocus();
+    }
+
+    @Override
+    public void onPositionDiscontinuity() {
+
+    }
+
+    @Override
+    public void onLoadError(IOException error) {
+        Toast.makeText(getApplicationContext(), "Media player error! Resetting.",
+                Toast.LENGTH_SHORT).show();
+        Log.e(TAG, "Error: what=" + String.valueOf(error));
+
+        mState = State.Stopped;
+        relaxResources(true);
+        giveUpAudioFocus();
+    }
+
 }

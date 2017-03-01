@@ -16,12 +16,16 @@
 
 package com.example.android.musicplayer;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.View.OnClickListener;
@@ -34,6 +38,7 @@ import android.widget.EditText;
  * Intents to our {@link MusicService}.
  * */
 public class MainActivity extends Activity implements OnClickListener {
+    private static final int MY_PERMISSIONS_REQUEST_READ_CONTACTS = 231;
     /**
      * The URL we suggest as default when adding by URL. This is just so that the user doesn't
      * have to find an URL to test this sample.
@@ -72,21 +77,52 @@ public class MainActivity extends Activity implements OnClickListener {
         mEjectButton.setOnClickListener(this);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+
+        if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.READ_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            buttonEnablement(false);
+
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
+                    MY_PERMISSIONS_REQUEST_READ_CONTACTS);
+        }
+    }
+
+    private void buttonEnablement(boolean val) {
+        mPlayButton.setEnabled(val);
+        mPauseButton.setEnabled(val);
+        mSkipButton.setEnabled(val);
+        mRewindButton.setEnabled(val);
+        mStopButton.setEnabled(val);
+        mEjectButton.setEnabled(val);
+    }
+
     public void onClick(View target) {
         // Send the correct intent to the MusicService, according to the button that was clicked
         if (target == mPlayButton)
-            startService(new Intent(MusicService.ACTION_PLAY));
+            controlService(MusicService.ACTION_PLAY);
         else if (target == mPauseButton)
-            startService(new Intent(MusicService.ACTION_PAUSE));
+            controlService(MusicService.ACTION_PAUSE);
         else if (target == mSkipButton)
-            startService(new Intent(MusicService.ACTION_SKIP));
+            controlService(MusicService.ACTION_SKIP);
         else if (target == mRewindButton)
-            startService(new Intent(MusicService.ACTION_REWIND));
+            controlService(MusicService.ACTION_REWIND);
         else if (target == mStopButton)
-            startService(new Intent(MusicService.ACTION_STOP));
+            controlService(MusicService.ACTION_STOP);
         else if (target == mEjectButton) {
             showUrlDialog();
         }
+    }
+
+    private void controlService(String action) {
+        Intent serviceIntent = new Intent(this,MusicService.class);
+        serviceIntent.setAction(action);
+        startService(new Intent(serviceIntent));
     }
 
     /** 
@@ -129,5 +165,29 @@ public class MainActivity extends Activity implements OnClickListener {
                 return true;
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           String permissions[], int[] grantResults) {
+        switch (requestCode) {
+            case MY_PERMISSIONS_REQUEST_READ_CONTACTS: {
+                // If request is cancelled, the result arrays are empty.
+                if (grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+
+                    buttonEnablement(true);
+
+                } else {
+
+                    // permission denied, boo! Disable the
+                    // functionality that depends on this permission.
+                }
+                return;
+            }
+
+            // other 'case' lines to check for other
+            // permissions this app might request
+        }
     }
 }
